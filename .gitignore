@@ -1,0 +1,12 @@
+# Bytecode, build products, and local environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+.env.*
