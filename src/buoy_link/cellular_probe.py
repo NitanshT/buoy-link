@@ -29,6 +29,51 @@ def counters():
     return {name: int((base / (name + '_bytes')).read_text().strip()) for name in ('rx', 'tx')}
 
 
+def discover_bearer():
+    """Find exactly one connected bearer and validate its IPv4 data against wwan0."""
+    try:
+        modems = json.loads(run(['mmcli', '-L', '-J'])).get('modem-list', [])
+        if not isinstance(modems, list):
+            raise ValueError('invalid modem list')
+        connected = []
+        for modem in modems:
+            if not isinstance(modem, str) or not modem.startswith('/org/freedesktop/ModemManager1/Modem/'):
+                raise ValueError('invalid modem path')
+            data = json.loads(run(['mmcli', '-m', modem, '-J']))['modem']['generic']
+            bearers = data.get('bearers') or []
+            if not isinstance(bearers, list):
+                raise ValueError('invalid bearer list')
+            for bearer in bearers:
+                if not isinstance(bearer, str) or not bearer.startswith('/org/freedesktop/ModemManager1/Bearer/'):
+                    raise ValueError('invalid bearer path')
+                item = json.loads(run(['mmcli', '-b', bearer, '-J']))['bearer']
+                if item['status'].get('connected') == 'yes':
+                    connected.append(item)
+        if not connected:
+            raise ProbeError('no connected modem bearer found')
+        if len(connected) != 1:
+            raise ProbeError('ambiguous: multiple connected modem bearers found')
+        item = connected[0]
+        if item['status'].get('interface') != 'wwan0':
+            raise ProbeError('connected bearer does not use wwan0')
+        config = item['ipv4-config']
+        source = str(ipaddress.IPv4Address(config['address']))
+        gateway = str(ipaddress.IPv4Address(config['gateway']))
+        prefix = int(config['prefix'])
+        network = ipaddress.IPv4Interface(f'{source}/{prefix}').network
+        if gateway == source or ipaddress.IPv4Address(gateway) not in network:
+            raise ProbeError('bearer IPv4 gateway is inconsistent with its subnet')
+        interfaces = json.loads(run(['ip', '-j', '-4', 'addr', 'show', 'dev', 'wwan0']))
+        if not any(a.get('local') == source and a.get('prefixlen') == prefix
+                   for interface in interfaces for a in interface.get('addr_info', [])):
+            raise ProbeError('bearer IPv4 address or prefix does not match wwan0')
+        return source, gateway
+    except ProbeError:
+        raise
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ProbeError('invalid or incomplete modem bearer discovery data') from exc
+
+
 def probe(source, gateway):
     source = str(ipaddress.IPv4Address(source))
     gateway = str(ipaddress.IPv4Address(gateway))
@@ -64,7 +109,13 @@ def probe(source, gateway):
                         'https://1.1.1.1/'], timeout=18).strip().split()
         if len(response) != 4 or response[1:] != [source, DESTINATION, '0']:
             raise ProbeError('unexpected HTTPS response metadata')
-        return {'http_status': int(response[0]), 'tls_verified': True,
+        try:
+            status = int(response[0])
+        except ValueError as exc:
+            raise ProbeError('invalid HTTPS status') from exc
+        if not 200 <= status < 400:
+            raise ProbeError(f'HTTPS request returned HTTP {status}')
+        return {'http_status': status, 'tls_verified': True,
                 'route': {'destination': DESTINATION, 'source': source, 'gateway': gateway, 'interface': 'wwan0'},
                 'interface_bytes_before': before, 'interface_bytes_after': counters()}
     finally:
@@ -80,16 +131,21 @@ def probe(source, gateway):
 
 def main():
     parser = argparse.ArgumentParser(description='Opt-in bounded HTTPS check via an existing wwan0 bearer')
-    parser.add_argument('--source', required=True, help='IPv4 address currently assigned to wwan0')
-    parser.add_argument('--gateway', required=True, help='Gateway reported by the active cellular bearer')
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--auto', action='store_true', help='discover the single connected modem bearer')
+    mode.add_argument('--source', help='IPv4 address currently assigned to wwan0')
+    parser.add_argument('--gateway', help='gateway reported by the active cellular bearer (with --source)')
     args = parser.parse_args()
+    if bool(args.source) != bool(args.gateway) or (args.auto and args.gateway):
+        parser.error('use --auto alone or provide both --source and --gateway')
 
     def interrupted(signum, frame):
         raise ProbeError('interrupted')
 
     previous = {s: signal.signal(s, interrupted) for s in (signal.SIGTERM, signal.SIGHUP)}
     try:
-        print(json.dumps(probe(args.source, args.gateway), indent=2))
+        source, gateway = discover_bearer() if args.auto else (args.source, args.gateway)
+        print(json.dumps(probe(source, gateway), indent=2))
     except (ProbeError, ValueError, OSError, KeyboardInterrupt) as exc:
         # Never include arbitrary subprocess stderr or modem/SIM identifiers.
         print(json.dumps({'error': str(exc) if isinstance(exc, ProbeError) else type(exc).__name__}))

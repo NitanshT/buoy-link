@@ -118,3 +118,61 @@ def test_subprocess_errors_do_not_expose_stderr(monkeypatch):
     with pytest.raises(p.ProbeError) as error:
         p.run(['ip', 'route'])
     assert '123456789012345' not in str(error.value)
+
+
+def discovery_system(bearers, addresses=None, modem_paths=None):
+    modems = modem_paths if modem_paths is not None else ['/org/freedesktop/ModemManager1/Modem/7']
+    def run(args, timeout=5):
+        if args[:2] == ['mmcli', '-L']:
+            return json.dumps({'modem-list': modems})
+        if args[:2] == ['mmcli', '-m']:
+            return json.dumps({'modem': {'generic': {'bearers': list(bearers)}}})
+        if args[:2] == ['mmcli', '-b']:
+            return json.dumps({'bearer': bearers[args[2]]})
+        if args[:5] == ['ip', '-j', '-4', 'addr', 'show']:
+            return json.dumps(addresses if addresses is not None else [{'addr_info': [{'local': '10.0.0.2', 'prefixlen': 24}]}])
+        raise AssertionError(args)
+    return run
+
+
+def bearer(connected='yes', interface='wwan0', gateway='10.0.0.1'):
+    return {'status': {'connected': connected, 'interface': interface}, 'ipv4-config': {'address': '10.0.0.2', 'gateway': gateway, 'prefix': '24'}}
+
+
+def test_auto_discovers_paths_not_indices(monkeypatch):
+    monkeypatch.setattr(p, 'run', discovery_system({'/org/freedesktop/ModemManager1/Bearer/19': bearer()}))
+    assert p.discover_bearer() == ('10.0.0.2', '10.0.0.1')
+
+
+@pytest.mark.parametrize('items, message', [
+    ({}, 'no connected'),
+    ({'/org/freedesktop/ModemManager1/Bearer/1': bearer('no')}, 'no connected'),
+    ({'/org/freedesktop/ModemManager1/Bearer/1': bearer(), '/org/freedesktop/ModemManager1/Bearer/2': bearer()}, 'ambiguous'),
+    ({'/org/freedesktop/ModemManager1/Bearer/1': bearer(interface='wwan1')}, 'does not use wwan0'),
+    ({'/org/freedesktop/ModemManager1/Bearer/1': bearer(gateway='10.9.0.1')}, 'inconsistent'),
+])
+def test_auto_rejects_unsuitable_bearers(monkeypatch, items, message):
+    monkeypatch.setattr(p, 'run', discovery_system(items))
+    with pytest.raises(p.ProbeError, match=message):
+        p.discover_bearer()
+
+
+def test_auto_rejects_mismatched_interface_address(monkeypatch):
+    monkeypatch.setattr(p, 'run', discovery_system({'/org/freedesktop/ModemManager1/Bearer/1': bearer()}, addresses=[{'addr_info': [{'local': '10.0.0.2', 'prefixlen': 30}]}]))
+    with pytest.raises(p.ProbeError, match='does not match wwan0'):
+        p.discover_bearer()
+
+
+@pytest.mark.parametrize('status', ['400', '404', '500'])
+def test_http_error_is_failure_and_cleans_up(monkeypatch, status):
+    fake = setup(monkeypatch)
+    def request(args, timeout=5):
+        if args[0] == 'curl':
+            fake.calls.append(args)
+            return f'{status} 10.0.0.2 1.1.1.1 0'
+        return fake(args, timeout)
+    monkeypatch.setattr(p, 'run', request)
+    with pytest.raises(p.ProbeError, match=f'HTTP {status}'):
+        p.probe('10.0.0.2', '10.0.0.1')
+    assert 'rule del' in mutations(fake)[-2]
+    assert 'route del' in mutations(fake)[-1]
