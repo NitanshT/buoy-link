@@ -27,13 +27,13 @@ Start the dashboard on the Pi from the project directory:
 .venv/bin/buoy-dashboard
 ```
 
-It listens only on `127.0.0.1:8765`. On Windows, with Tailscale connected and SSH key authentication already working, run in PowerShell from your checkout:
+It listens only on `127.0.0.1:8765`. On Windows, with SSH key authentication already working, pass the Pi's reachable SSH destination explicitly in PowerShell from your checkout. For Wi-Fi:
 
 ```powershell
-./scripts/open-dashboard.ps1
+./scripts/open-dashboard.ps1 -Pi pi@10.79.8.214
 ```
 
-The launcher opens a local SSH tunnel to `pi@100.68.26.99` and starts the browser. Keep its PowerShell window open; press Enter to close the tunnel. Use `-Pi user@address` or `-LocalPort 8766` if needed. If the page is unavailable, start the Pi dashboard first. The Pi service must remain running independently of the tunnel.
+Alternatively, if Tailscale is connected, use `./scripts/open-dashboard.ps1 -Pi pi@100.68.26.99`. Use the Pi's current address if it has changed; the launcher does not require an SSH alias or Tailscale when using Wi-Fi. It opens a local SSH tunnel and starts the browser. Keep its PowerShell window open; press Enter to close the tunnel. Use `-LocalPort 8766` if needed. If the page is unavailable, start the Pi dashboard first. The Pi service must remain running independently of the tunnel.
 
 The dashboard is read-only and does not initiate a cellular probe. An optional existing probe JSON file can be supplied with `--probe-result PATH`; it must include an ISO 8601 `recorded_at`, `http_status`, and `tls_verified`. Without such a file it reports “Not recorded.” Event details are deliberately withheld because journals can contain identifiers. A registered modem is not necessarily data-connected. Cellular-only Tailscale SSH has not passed testing; do not rely on it for remote access.
 
