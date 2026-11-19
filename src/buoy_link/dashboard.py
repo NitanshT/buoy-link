@@ -95,7 +95,19 @@ def recent_events():
             if unit not in ('NetworkManager.service', 'ModemManager.service', 'tailscaled.service'):
                 continue
             stamp = datetime.fromtimestamp(int(data['__REALTIME_TIMESTAMP']) / 1000000, timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
-            events.append((stamp, unit.removesuffix('.service') + ' reported a warning or error.'))
+            message = data.get('MESSAGE', '')
+            message = message.lower() if isinstance(message, str) else ''
+            if 'network reject' in message or 'network-failure' in message:
+                label = 'Mobile network rejection or failure'
+            elif 'dns' in message:
+                label = 'DNS warning or error'
+            elif 'timed out' in message or 'timeout' in message:
+                label = 'Operation timed out'
+            elif 'failed' in message or 'error' in message:
+                label = 'Operation failed'
+            else:
+                label = 'Warning or error'
+            events.append((stamp, unit.removesuffix('.service') + ': ' + label + '.'))
         except (ValueError, TypeError, KeyError, OSError, OverflowError):
             continue
     return events or [('No recent events', 'No warnings or errors were returned.')]
